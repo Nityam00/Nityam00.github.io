@@ -1,1 +1,2242 @@
-Hello World 
+Manifest.xml
+
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.google.android.gms.samples.vision.ocrreader"
+    android:installLocation="auto" >
+
+    <uses-feature android:name="android.hardware.camera" />
+
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <application
+        android:allowBackup="true"
+        android:fullBackupContent="false"
+        android:hardwareAccelerated="true"
+        android:icon="@drawable/icon"
+        android:label="OcrReaderApp"
+        android:supportsRtl = "true"
+        android:theme="@style/Theme.AppCompat" >
+        <meta-data
+            android:name="com.google.android.gms.version"
+            android:value="@integer/google_play_services_version" />
+        <meta-data
+            android:name="com.google.android.gms.vision.DEPENDENCIES"
+            android:value="ocr" />
+
+        <activity android:name="com.google.android.gms.samples.vision.ocrreader.OcrCaptureActivity"
+            android:label="Read Text">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+
+
+
+ocr_capture.xml
+
+<?xml version="1.0" encoding="utf-8"?>
+
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/topLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:keepScreenOn="true">
+
+    <com.google.android.gms.samples.vision.ocrreader.ui.camera.CameraSourcePreview
+        android:id="@+id/preview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <com.google.android.gms.samples.vision.ocrreader.ui.camera.GraphicOverlay
+            android:id="@+id/graphicOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+    </com.google.android.gms.samples.vision.ocrreader.ui.camera.CameraSourcePreview>
+
+</LinearLayout>
+
+OcrCaptureActivity.java
+
+package com.google.android.gms.samples.vision.ocrreader;
+
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.hardware.Camera;
+import android.os.Bundle;
+import android.speech.tts.TextToSpeech;
+import android.support.annotation.NonNull;
+import android.support.design.widget.Snackbar;
+import android.support.v4.app.ActivityCompat;
+import android.support.v7.app.AppCompatActivity;
+import android.util.Log;
+import android.view.GestureDetector;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
+import android.view.View;
+import android.widget.Toast;
+
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.GoogleApiAvailability;
+import com.google.android.gms.samples.vision.ocrreader.ui.camera.CameraSource;
+import com.google.android.gms.samples.vision.ocrreader.ui.camera.CameraSourcePreview;
+import com.google.android.gms.samples.vision.ocrreader.ui.camera.GraphicOverlay;
+import com.google.android.gms.vision.text.TextBlock;
+import com.google.android.gms.vision.text.TextRecognizer;
+
+import java.io.IOException;
+import java.util.Locale;
+
+/**
+ * Activity for the Ocr Detecting app.  This app detects text and displays the value with the
+ * rear facing camera. During detection overlay graphics are drawn to indicate the position,
+ * size, and contents of each TextBlock.
+ */
+public final class OcrCaptureActivity extends AppCompatActivity {
+    private static final String TAG = "OcrCaptureActivity";
+
+    // Intent request code to handle updating play services if needed.
+    private static final int RC_HANDLE_GMS = 9001;
+
+    // Permission request codes need to be < 256
+    private static final int RC_HANDLE_CAMERA_PERM = 2;
+
+    // Constants used to pass extra data in the intent
+    public static final String AutoFocus = "AutoFocus";
+    public static final String UseFlash = "UseFlash";
+    public static final String TextBlockObject = "String";
+
+    private CameraSource cameraSource;
+    private CameraSourcePreview preview;
+    private GraphicOverlay<OcrGraphic> graphicOverlay;
+
+    // Helper objects for detecting taps and pinches.
+    private ScaleGestureDetector scaleGestureDetector;
+    private GestureDetector gestureDetector;
+
+    // A TextToSpeech engine for speaking a String value.
+    private TextToSpeech tts;
+
+    /**
+     * Initializes the UI and creates the detector pipeline.
+     */
+    @Override
+    public void onCreate(Bundle bundle) {
+        super.onCreate(bundle);
+        setContentView(R.layout.ocr_capture);
+
+        preview = (CameraSourcePreview) findViewById(R.id.preview);
+        graphicOverlay = (GraphicOverlay<OcrGraphic>) findViewById(R.id.graphicOverlay);
+
+        // Set good defaults for capturing text.
+        boolean autoFocus = true;
+        boolean useFlash = false;
+
+        // Check for the camera permission before accessing the camera.  If the
+        // permission is not granted yet, request permission.
+        int rc = ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA);
+        if (rc == PackageManager.PERMISSION_GRANTED) {
+            createCameraSource(autoFocus, useFlash);
+        } else {
+            requestCameraPermission();
+        }
+
+        gestureDetector = new GestureDetector(this, new CaptureGestureListener());
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleListener());
+
+        Snackbar.make(graphicOverlay, "Tap to Speak. Pinch/Stretch to zoom",
+                Snackbar.LENGTH_LONG)
+                .show();
+
+        // Set up the Text To Speech engine.
+        TextToSpeech.OnInitListener listener =
+                new TextToSpeech.OnInitListener() {
+                    @Override
+                    public void onInit(final int status) {
+                        if (status == TextToSpeech.SUCCESS) {
+                            Log.d("OnInitListener", "Text to speech engine started successfully.");
+                            tts.setLanguage(Locale.US);
+                        } else {
+                            Log.d("OnInitListener", "Error starting the text to speech engine.");
+                        }
+                    }
+                };
+        tts = new TextToSpeech(this.getApplicationContext(), listener);
+    }
+
+    /**
+     * Handles the requesting of the camera permission.  This includes
+     * showing a "Snackbar" message of why the permission is needed then
+     * sending the request.
+     */
+    private void requestCameraPermission() {
+        Log.w(TAG, "Camera permission is not granted. Requesting permission");
+
+        final String[] permissions = new String[]{Manifest.permission.CAMERA};
+
+        if (!ActivityCompat.shouldShowRequestPermissionRationale(this,
+                Manifest.permission.CAMERA)) {
+            ActivityCompat.requestPermissions(this, permissions, RC_HANDLE_CAMERA_PERM);
+            return;
+        }
+
+        final Activity thisActivity = this;
+
+        View.OnClickListener listener = new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                ActivityCompat.requestPermissions(thisActivity, permissions,
+                        RC_HANDLE_CAMERA_PERM);
+            }
+        };
+
+        Snackbar.make(graphicOverlay, R.string.permission_camera_rationale,
+                Snackbar.LENGTH_INDEFINITE)
+                .setAction(R.string.ok, listener)
+                .show();
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent e) {
+        boolean b = scaleGestureDetector.onTouchEvent(e);
+
+        boolean c = gestureDetector.onTouchEvent(e);
+
+        return b || c || super.onTouchEvent(e);
+    }
+
+    /**
+     * Creates and starts the camera.  Note that this uses a higher resolution in comparison
+     * to other detection examples to enable the ocr detector to detect small text samples
+     * at long distances.
+     *
+     * Suppressing InlinedApi since there is a check that the minimum version is met before using
+     * the constant.
+     */
+    @SuppressLint("InlinedApi")
+    private void createCameraSource(boolean autoFocus, boolean useFlash) {
+        Context context = getApplicationContext();
+
+        // A text recognizer is created to find text.  An associated multi-processor instance
+        // is set to receive the text recognition results, track the text, and maintain
+        // graphics for each text block on screen.  The factory is used by the multi-processor to
+        // create a separate tracker instance for each text block.
+        TextRecognizer textRecognizer = new TextRecognizer.Builder(context).build();
+        textRecognizer.setProcessor(new OcrDetectorProcessor(graphicOverlay));
+
+        if (!textRecognizer.isOperational()) {
+            // Note: The first time that an app using a Vision API is installed on a
+            // device, GMS will download a native libraries to the device in order to do detection.
+            // Usually this completes before the app is run for the first time.  But if that
+            // download has not yet completed, then the above call will not detect any text,
+            // barcodes, or faces.
+            //
+            // isOperational() can be used to check if the required native libraries are currently
+            // available.  The detectors will automatically become operational once the library
+            // downloads complete on device.
+            Log.w(TAG, "Detector dependencies are not yet available.");
+
+            // Check for low storage.  If there is low storage, the native library will not be
+            // downloaded, so detection will not become operational.
+            IntentFilter lowstorageFilter = new IntentFilter(Intent.ACTION_DEVICE_STORAGE_LOW);
+            boolean hasLowStorage = registerReceiver(null, lowstorageFilter) != null;
+
+            if (hasLowStorage) {
+                Toast.makeText(this, R.string.low_storage_error, Toast.LENGTH_LONG).show();
+                Log.w(TAG, getString(R.string.low_storage_error));
+            }
+        }
+
+        // Creates and starts the camera.  Note that this uses a higher resolution in comparison
+        // to other detection examples to enable the text recognizer to detect small pieces of text.
+        cameraSource =
+                new CameraSource.Builder(getApplicationContext(), textRecognizer)
+                .setFacing(CameraSource.CAMERA_FACING_BACK)
+                .setRequestedPreviewSize(1280, 1024)
+                .setRequestedFps(2.0f)
+                .setFlashMode(useFlash ? Camera.Parameters.FLASH_MODE_TORCH : null)
+                .setFocusMode(autoFocus ? Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO : null)
+                .build();
+    }
+
+    /**
+     * Restarts the camera.
+     */
+    @Override
+    protected void onResume() {
+        super.onResume();
+        startCameraSource();
+    }
+
+    /**
+     * Stops the camera.
+     */
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (preview != null) {
+            preview.stop();
+        }
+    }
+
+    /**
+     * Releases the resources associated with the camera source, the associated detectors, and the
+     * rest of the processing pipeline.
+     */
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (preview != null) {
+            preview.release();
+        }
+    }
+
+    /**
+     * Callback for the result from requesting permissions. This method
+     * is invoked for every call on {@link #requestPermissions(String[], int)}.
+     * <p>
+     * <strong>Note:</strong> It is possible that the permissions request interaction
+     * with the user is interrupted. In this case you will receive empty permissions
+     * and results arrays which should be treated as a cancellation.
+     * </p>
+     *
+     * @param requestCode  The request code passed in {@link #requestPermissions(String[], int)}.
+     * @param permissions  The requested permissions. Never null.
+     * @param grantResults The grant results for the corresponding permissions
+     *                     which is either {@link PackageManager#PERMISSION_GRANTED}
+     *                     or {@link PackageManager#PERMISSION_DENIED}. Never null.
+     * @see #requestPermissions(String[], int)
+     */
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        if (requestCode != RC_HANDLE_CAMERA_PERM) {
+            Log.d(TAG, "Got unexpected permission result: " + requestCode);
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+            return;
+        }
+
+        if (grantResults.length != 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Log.d(TAG, "Camera permission granted - initialize the camera source");
+            // we have permission, so create the camerasource
+            boolean autoFocus = getIntent().getBooleanExtra(AutoFocus,true);
+            boolean useFlash = getIntent().getBooleanExtra(UseFlash, false);
+            createCameraSource(autoFocus, useFlash);
+            return;
+        }
+
+        Log.e(TAG, "Permission not granted: results len = " + grantResults.length +
+                " Result code = " + (grantResults.length > 0 ? grantResults[0] : "(empty)"));
+
+        DialogInterface.OnClickListener listener = new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialog, int id) {
+                finish();
+            }
+        };
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle("Multitracker sample")
+                .setMessage(R.string.no_camera_permission)
+                .setPositiveButton(R.string.ok, listener)
+                .show();
+    }
+
+    /**
+     * Starts or restarts the camera source, if it exists.  If the camera source doesn't exist yet
+     * (e.g., because onResume was called before the camera source was created), this will be called
+     * again when the camera source is created.
+     */
+    private void startCameraSource() throws SecurityException {
+        // check that the device has play services available.
+        int code = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(
+                getApplicationContext());
+        if (code != ConnectionResult.SUCCESS) {
+            Dialog dlg =
+                    GoogleApiAvailability.getInstance().getErrorDialog(this, code, RC_HANDLE_GMS);
+            dlg.show();
+        }
+
+        if (cameraSource != null) {
+            try {
+                preview.start(cameraSource, graphicOverlay);
+            } catch (IOException e) {
+                Log.e(TAG, "Unable to start camera source.", e);
+                cameraSource.release();
+                cameraSource = null;
+            }
+        }
+    }
+
+    /**
+     * onTap is called to speak the tapped TextBlock, if any, out loud.
+     *
+     * @param rawX - the raw position of the tap
+     * @param rawY - the raw position of the tap.
+     * @return true if the tap was on a TextBlock
+     */
+    private boolean onTap(float rawX, float rawY) {
+        OcrGraphic graphic = graphicOverlay.getGraphicAtLocation(rawX, rawY);
+        TextBlock text = null;
+        if (graphic != null) {
+            text = graphic.getTextBlock();
+            if (text != null && text.getValue() != null) {
+                Log.d(TAG, "text data is being spoken! " + text.getValue());
+                // Speak the string.
+                tts.speak(text.getValue(), TextToSpeech.QUEUE_ADD, null, "DEFAULT");
+            }
+            else {
+                Log.d(TAG, "text data is null");
+            }
+        }
+        else {
+            Log.d(TAG,"no text detected");
+        }
+        return text != null;
+    }
+
+    private class CaptureGestureListener extends GestureDetector.SimpleOnGestureListener {
+
+        @Override
+        public boolean onSingleTapConfirmed(MotionEvent e) {
+            return onTap(e.getRawX(), e.getRawY()) || super.onSingleTapConfirmed(e);
+        }
+    }
+
+    private class ScaleListener implements ScaleGestureDetector.OnScaleGestureListener {
+
+        /**
+         * Responds to scaling events for a gesture in progress.
+         * Reported by pointer motion.
+         *
+         * @param detector The detector reporting the event - use this to
+         *                 retrieve extended info about event state.
+         * @return Whether or not the detector should consider this event
+         * as handled. If an event was not handled, the detector
+         * will continue to accumulate movement until an event is
+         * handled. This can be useful if an application, for example,
+         * only wants to update scaling factors if the change is
+         * greater than 0.01.
+         */
+        @Override
+        public boolean onScale(ScaleGestureDetector detector) {
+            return false;
+        }
+
+        /**
+         * Responds to the beginning of a scaling gesture. Reported by
+         * new pointers going down.
+         *
+         * @param detector The detector reporting the event - use this to
+         *                 retrieve extended info about event state.
+         * @return Whether or not the detector should continue recognizing
+         * this gesture. For example, if a gesture is beginning
+         * with a focal point outside of a region where it makes
+         * sense, onScaleBegin() may return false to ignore the
+         * rest of the gesture.
+         */
+        @Override
+        public boolean onScaleBegin(ScaleGestureDetector detector) {
+            return true;
+        }
+
+        /**
+         * Responds to the end of a scale gesture. Reported by existing
+         * pointers going up.
+         * <p/>
+         * Once a scale has ended, {@link ScaleGestureDetector#getFocusX()}
+         * and {@link ScaleGestureDetector#getFocusY()} will return focal point
+         * of the pointers remaining on the screen.
+         *
+         * @param detector The detector reporting the event - use this to
+         *                 retrieve extended info about event state.
+         */
+        @Override
+        public void onScaleEnd(ScaleGestureDetector detector) {
+            if (cameraSource != null) {
+                cameraSource.doZoom(detector.getScaleFactor());
+            }
+        }
+    }
+}
+
+OcrDetectorProcessor
+
+package com.google.android.gms.samples.vision.ocrreader;
+
+import android.util.Log;
+import android.util.SparseArray;
+
+import com.google.android.gms.samples.vision.ocrreader.ui.camera.GraphicOverlay;
+import com.google.android.gms.vision.Detector;
+import com.google.android.gms.vision.text.TextBlock;
+
+/**
+ * A very simple Processor which gets detected TextBlocks and adds them to the overlay
+ * as OcrGraphics.
+ */
+public class OcrDetectorProcessor implements Detector.Processor<TextBlock> {
+
+    private GraphicOverlay<OcrGraphic> graphicOverlay;
+
+    OcrDetectorProcessor(GraphicOverlay<OcrGraphic> ocrGraphicOverlay) {
+        graphicOverlay = ocrGraphicOverlay;
+    }
+
+    /**
+     * Called by the detector to deliver detection results.
+     * If your application called for it, this could be a place to check for
+     * equivalent detections by tracking TextBlocks that are similar in location and content from
+     * previous frames, or reduce noise by eliminating TextBlocks that have not persisted through
+     * multiple detections.
+     */
+    @Override
+    public void receiveDetections(Detector.Detections<TextBlock> detections) {
+        graphicOverlay.clear();
+        SparseArray<TextBlock> items = detections.getDetectedItems();
+        for (int i = 0; i < items.size(); ++i) {
+            TextBlock item = items.valueAt(i);
+            if (item != null && item.getValue() != null) {
+                Log.d("OcrDetectorProcessor", "Text detected! " + item.getValue());
+                OcrGraphic graphic = new OcrGraphic(graphicOverlay, item);
+                graphicOverlay.add(graphic);
+            }
+        }
+    }
+
+    /**
+     * Frees the resources associated with this detection processor.
+     */
+    @Override
+    public void release() {
+        graphicOverlay.clear();
+    }
+}
+
+OcrGraphic.java
+
+package com.google.android.gms.samples.vision.ocrreader;
+
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.RectF;
+
+import com.google.android.gms.samples.vision.ocrreader.ui.camera.GraphicOverlay;
+import com.google.android.gms.vision.text.Text;
+import com.google.android.gms.vision.text.TextBlock;
+
+import java.util.List;
+
+/**
+ * Graphic instance for rendering TextBlock position, size, and ID within an associated graphic
+ * overlay view.
+ */
+public class OcrGraphic extends GraphicOverlay.Graphic {
+
+    private int id;
+
+    private static final int TEXT_COLOR = Color.WHITE;
+
+    private static Paint rectPaint;
+    private static Paint textPaint;
+    private final TextBlock textBlock;
+
+    OcrGraphic(GraphicOverlay overlay, TextBlock text) {
+        super(overlay);
+
+        textBlock = text;
+
+        if (rectPaint == null) {
+            rectPaint = new Paint();
+            rectPaint.setColor(TEXT_COLOR);
+            rectPaint.setStyle(Paint.Style.STROKE);
+            rectPaint.setStrokeWidth(4.0f);
+        }
+
+        if (textPaint == null) {
+            textPaint = new Paint();
+            textPaint.setColor(TEXT_COLOR);
+            textPaint.setTextSize(54.0f);
+        }
+        // Redraw the overlay, as this graphic has been added.
+        postInvalidate();
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public void setId(int id) {
+        this.id = id;
+    }
+
+    public TextBlock getTextBlock() {
+        return textBlock;
+    }
+
+    /**
+     * Checks whether a point is within the bounding box of this graphic.
+     * The provided point should be relative to this graphic's containing overlay.
+     * @param x An x parameter in the relative context of the canvas.
+     * @param y A y parameter in the relative context of the canvas.
+     * @return True if the provided point is contained within this graphic's bounding box.
+     */
+    public boolean contains(float x, float y) {
+        if (textBlock == null) {
+            return false;
+        }
+        RectF rect = new RectF(textBlock.getBoundingBox());
+        rect = translateRect(rect);
+        return rect.contains(x, y);
+    }
+
+    /**
+     * Draws the text block annotations for position, size, and raw value on the supplied canvas.
+     */
+    @Override
+    public void draw(Canvas canvas) {
+        if (textBlock == null) {
+            return;
+        }
+
+        // Draws the bounding box around the TextBlock.
+        RectF rect = new RectF(textBlock.getBoundingBox());
+        rect = translateRect(rect);
+        canvas.drawRect(rect, rectPaint);
+
+        // Break the text into multiple lines and draw each one according to its own bounding box.
+        List<? extends Text> textComponents = textBlock.getComponents();
+        for(Text currentText : textComponents) {
+            float left = translateX(currentText.getBoundingBox().left);
+            float bottom = translateY(currentText.getBoundingBox().bottom);
+            canvas.drawText(currentText.getValue(), left, bottom, textPaint);
+        }
+    }
+}
+
+CameraSource.java
+
+package com.google.android.gms.samples.vision.ocrreader.ui.camera;
+
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
+import android.content.Context;
+import android.graphics.ImageFormat;
+import android.graphics.SurfaceTexture;
+import android.hardware.Camera;
+import android.hardware.Camera.CameraInfo;
+import android.os.Build;
+import android.os.SystemClock;
+import android.support.annotation.Nullable;
+import android.support.annotation.RequiresPermission;
+import android.support.annotation.StringDef;
+import android.util.Log;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.WindowManager;
+
+import com.google.android.gms.common.images.Size;
+import com.google.android.gms.vision.Detector;
+import com.google.android.gms.vision.Frame;
+
+import java.io.IOException;
+import java.lang.Thread.State;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+// Note: This requires Google Play Services 8.1 or higher, due to using indirect byte buffers for
+// storing images.
+
+/**
+ * Manages the camera in conjunction with an underlying
+ * {@link com.google.android.gms.vision.Detector}.  This receives preview frames from the camera at
+ * a specified rate, sending those frames to the detector as fast as it is able to process those
+ * frames.
+ * <p/>
+ * This camera source makes a best effort to manage processing on preview frames as fast as
+ * possible, while at the same time minimizing lag.  As such, frames may be dropped if the detector
+ * is unable to keep up with the rate of frames generated by the camera.  You should use
+ * {@link CameraSource.Builder#setRequestedFps(float)} to specify a frame rate that works well with
+ * the capabilities of the camera hardware and the detector options that you have selected.  If CPU
+ * utilization is higher than you'd like, then you may want to consider reducing FPS.  If the camera
+ * preview or detector results are too "jerky", then you may want to consider increasing FPS.
+ * <p/>
+ * The following Android permission is required to use the camera:
+ * <ul>
+ * <li>android.permissions.CAMERA</li>
+ * </ul>
+ */
+@SuppressWarnings("deprecation")
+public class CameraSource {
+    @SuppressLint("InlinedApi")
+    public static final int CAMERA_FACING_BACK = CameraInfo.CAMERA_FACING_BACK;
+    @SuppressLint("InlinedApi")
+    public static final int CAMERA_FACING_FRONT = CameraInfo.CAMERA_FACING_FRONT;
+
+    private static final String TAG = "OpenCameraSource";
+
+    /**
+     * The dummy surface texture must be assigned a chosen name.  Since we never use an OpenGL
+     * context, we can choose any ID we want here.
+     */
+    private static final int DUMMY_TEXTURE_NAME = 100;
+
+    /**
+     * If the absolute difference between a preview size aspect ratio and a picture size aspect
+     * ratio is less than this tolerance, they are considered to be the same aspect ratio.
+     */
+    private static final float ASPECT_RATIO_TOLERANCE = 0.01f;
+
+    @StringDef({
+            Camera.Parameters.FOCUS_MODE_CONTINUOUS_PICTURE,
+            Camera.Parameters.FOCUS_MODE_CONTINUOUS_VIDEO,
+            Camera.Parameters.FOCUS_MODE_AUTO,
+            Camera.Parameters.FOCUS_MODE_EDOF,
+            Camera.Parameters.FOCUS_MODE_FIXED,
+            Camera.Parameters.FOCUS_MODE_INFINITY,
+            Camera.Parameters.FOCUS_MODE_MACRO
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    private @interface FocusMode {}
+
+    @StringDef({
+            Camera.Parameters.FLASH_MODE_ON,
+            Camera.Parameters.FLASH_MODE_OFF,
+            Camera.Parameters.FLASH_MODE_AUTO,
+            Camera.Parameters.FLASH_MODE_RED_EYE,
+            Camera.Parameters.FLASH_MODE_TORCH
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    private @interface FlashMode {}
+
+    private Context context;
+
+    private final Object cameraLock = new Object();
+
+    // Guarded by cameraLock
+    private Camera camera;
+
+    private int mFacing = CAMERA_FACING_BACK;
+
+    /**
+     * Rotation of the device, and thus the associated preview images captured from the device.
+     * See {@link Frame.Metadata#getRotation()}.
+     */
+    private int rotation;
+
+    private Size previewSize;
+
+    // These values may be requested by the caller.  Due to hardware limitations, we may need to
+    // select close, but not exactly the same values for these.
+    private float requestedFps = 30.0f;
+    private int requestedPreviewWidth = 1024;
+    private int requestedPreviewHeight = 768;
+
+
+    private String focusMode = null;
+    private String flashMode = null;
+
+    // These instances need to be held onto to avoid GC of their underlying resources.  Even though
+    // these aren't used outside of the method that creates them, they still must have hard
+    // references maintained to them.
+    private SurfaceView dummySurfaceView;
+    private SurfaceTexture dummySurfaceTexture;
+
+    /**
+     * Dedicated thread and associated runnable for calling into the detector with frames, as the
+     * frames become available from the camera.
+     */
+    private Thread processingThread;
+    private FrameProcessingRunnable frameProcessor;
+
+    /**
+     * Map to convert between a byte array, received from the camera, and its associated byte
+     * buffer.  We use byte buffers internally because this is a more efficient way to call into
+     * native code later (avoids a potential copy).
+     */
+    private Map<byte[], ByteBuffer> bytesToByteBuffer = new HashMap<>();
+
+    //==============================================================================================
+    // Builder
+    //==============================================================================================
+
+    /**
+     * Builder for configuring and creating an associated camera source.
+     */
+    public static class Builder {
+        private final Detector<?> detector;
+        private CameraSource cameraSource = new CameraSource();
+
+        /**
+         * Creates a camera source builder with the supplied context and detector.  Camera preview
+         * images will be streamed to the associated detector upon starting the camera source.
+         */
+        public Builder(Context context, Detector<?> detector) {
+            if (context == null) {
+                throw new IllegalArgumentException("No context supplied.");
+            }
+            if (detector == null) {
+                throw new IllegalArgumentException("No detector supplied.");
+            }
+
+            this.detector = detector;
+            cameraSource.context = context;
+        }
+
+        /**
+         * Sets the requested frame rate in frames per second.  If the exact requested value is not
+         * not available, the best matching available value is selected.   Default: 30.
+         */
+        public Builder setRequestedFps(float fps) {
+            if (fps <= 0) {
+                throw new IllegalArgumentException("Invalid fps: " + fps);
+            }
+            cameraSource.requestedFps = fps;
+            return this;
+        }
+
+        public Builder setFocusMode(@FocusMode String mode) {
+            cameraSource.focusMode = mode;
+            return this;
+        }
+
+        public Builder setFlashMode(@FlashMode String mode) {
+            cameraSource.flashMode = mode;
+            return this;
+        }
+
+        /**
+         * Sets the desired width and height of the camera frames in pixels.  If the exact desired
+         * values are not available options, the best matching available options are selected.
+         * Also, we try to select a preview size which corresponds to the aspect ratio of an
+         * associated full picture size, if applicable.  Default: 1024x768.
+         */
+        public Builder setRequestedPreviewSize(int width, int height) {
+            // Restrict the requested range to something within the realm of possibility.  The
+            // choice of 1000000 is a bit arbitrary -- intended to be well beyond resolutions that
+            // devices can support.  We bound this to avoid int overflow in the code later.
+            final int MAX = 1000000;
+            if ((width <= 0) || (width > MAX) || (height <= 0) || (height > MAX)) {
+                throw new IllegalArgumentException("Invalid preview size: " + width + "x" + height);
+            }
+            cameraSource.requestedPreviewWidth = width;
+            cameraSource.requestedPreviewHeight = height;
+            return this;
+        }
+
+        /**
+         * Sets the camera to use (either {@link #CAMERA_FACING_BACK} or
+         * {@link #CAMERA_FACING_FRONT}). Default: back facing.
+         */
+        public Builder setFacing(int facing) {
+            if ((facing != CAMERA_FACING_BACK) && (facing != CAMERA_FACING_FRONT)) {
+                throw new IllegalArgumentException("Invalid camera: " + facing);
+            }
+            cameraSource.mFacing = facing;
+            return this;
+        }
+
+        /**
+         * Creates an instance of the camera source.
+         */
+        public CameraSource build() {
+            cameraSource.frameProcessor = cameraSource.new FrameProcessingRunnable(detector);
+            return cameraSource;
+        }
+    }
+
+    //==============================================================================================
+    // Bridge Functionality for the Camera1 API
+    //==============================================================================================
+
+    /**
+     * Callback interface used to signal the moment of actual image capture.
+     */
+    public interface ShutterCallback {
+        /**
+         * Called as near as possible to the moment when a photo is captured from the sensor. This
+         * is a good opportunity to play a shutter sound or give other feedback of camera operation.
+         * This may be some time after the photo was triggered, but some time before the actual data
+         * is available.
+         */
+        void onShutter();
+    }
+
+    /**
+     * Callback interface used to supply image data from a photo capture.
+     */
+    public interface PictureCallback {
+        /**
+         * Called when image data is available after a picture is taken.  The format of the data
+         * is a jpeg binary.
+         */
+        void onPictureTaken(byte[] data);
+    }
+
+    /**
+     * Callback interface used to notify on completion of camera auto focus.
+     */
+    public interface AutoFocusCallback {
+        /**
+         * Called when the camera auto focus completes.  If the camera
+         * does not support auto-focus and autoFocus is called,
+         * onAutoFocus will be called immediately with a fake value of
+         * <code>success</code> set to <code>true</code>.
+         * <p/>
+         * The auto-focus routine does not lock auto-exposure and auto-white
+         * balance after it completes.
+         *
+         * @param success true if focus was successful, false if otherwise
+         */
+        void onAutoFocus(boolean success);
+    }
+
+    /**
+     * Callback interface used to notify on auto focus start and stop.
+     * <p/>
+     * <p>This is only supported in continuous autofocus modes -- {@link
+     * Camera.Parameters#FOCUS_MODE_CONTINUOUS_VIDEO} and {@link
+     * Camera.Parameters#FOCUS_MODE_CONTINUOUS_PICTURE}. Applications can show
+     * autofocus animation based on this.</p>
+     */
+    public interface AutoFocusMoveCallback {
+        /**
+         * Called when the camera auto focus starts or stops.
+         *
+         * @param start true if focus starts to move, false if focus stops to move
+         */
+        void onAutoFocusMoving(boolean start);
+    }
+
+    //==============================================================================================
+    // Public
+    //==============================================================================================
+
+    /**
+     * Stops the camera and releases the resources of the camera and underlying detector.
+     */
+    public void release() {
+        synchronized (cameraLock) {
+            stop();
+            frameProcessor.release();
+        }
+    }
+
+    /**
+     * Opens the camera and starts sending preview frames to the underlying detector.  The preview
+     * frames are not displayed.
+     *
+     * @throws IOException if the camera's preview texture or display could not be initialized
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    public CameraSource start() throws IOException {
+        synchronized (cameraLock) {
+            if (camera != null) {
+                return this;
+            }
+
+            camera = createCamera();
+
+            // SurfaceTexture was introduced in Honeycomb (11), so if we are running and
+            // old version of Android. fall back to use SurfaceView.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+                dummySurfaceTexture = new SurfaceTexture(DUMMY_TEXTURE_NAME);
+                camera.setPreviewTexture(dummySurfaceTexture);
+            } else {
+                dummySurfaceView = new SurfaceView(context);
+                camera.setPreviewDisplay(dummySurfaceView.getHolder());
+            }
+            camera.startPreview();
+
+            processingThread = new Thread(frameProcessor);
+            frameProcessor.setActive(true);
+            processingThread.start();
+        }
+        return this;
+    }
+
+    /**
+     * Opens the camera and starts sending preview frames to the underlying detector.  The supplied
+     * surface holder is used for the preview so frames can be displayed to the user.
+     *
+     * @param surfaceHolder the surface holder to use for the preview frames
+     * @throws IOException if the supplied surface holder could not be used as the preview display
+     */
+    @RequiresPermission(Manifest.permission.CAMERA)
+    public CameraSource start(SurfaceHolder surfaceHolder) throws IOException {
+        synchronized (cameraLock) {
+            if (camera != null) {
+                return this;
+            }
+
+            camera = createCamera();
+            camera.setPreviewDisplay(surfaceHolder);
+            camera.startPreview();
+
+            processingThread = new Thread(frameProcessor);
+            frameProcessor.setActive(true);
+            processingThread.start();
+        }
+        return this;
+    }
+
+    /**
+     * Closes the camera and stops sending frames to the underlying frame detector.
+     * <p/>
+     * This camera source may be restarted again by calling {@link #start()} or
+     * {@link #start(SurfaceHolder)}.
+     * <p/>
+     * Call {@link #release()} instead to completely shut down this camera source and release the
+     * resources of the underlying detector.
+     */
+    public void stop() {
+        synchronized (cameraLock) {
+            frameProcessor.setActive(false);
+            if (processingThread != null) {
+                try {
+                    // Wait for the thread to complete to ensure that we can't have multiple threads
+                    // executing at the same time (i.e., which would happen if we called start too
+                    // quickly after stop).
+                    processingThread.join();
+                } catch (InterruptedException e) {
+                    Log.d(TAG, "Frame processing thread interrupted on release.");
+                }
+                processingThread = null;
+            }
+
+            // clear the buffer to prevent oom exceptions
+            bytesToByteBuffer.clear();
+
+            if (camera != null) {
+                camera.stopPreview();
+                camera.setPreviewCallbackWithBuffer(null);
+                try {
+                    // We want to be compatible back to Gingerbread, but SurfaceTexture
+                    // wasn't introduced until Honeycomb.  Since the interface cannot use a
+                    // SurfaceTexture, if the developer wants to display a preview we must use a
+                    // SurfaceHolder.  If the developer doesn't want to display a preview we use a
+                    // SurfaceTexture if we are running at least Honeycomb.
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+                        camera.setPreviewTexture(null);
+
+                    } else {
+                        camera.setPreviewDisplay(null);
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to clear camera preview: " + e);
+                }
+                camera.release();
+                camera = null;
+            }
+        }
+    }
+
+    /**
+     * Returns the preview size that is currently in use by the underlying camera.
+     */
+    public Size getPreviewSize() {
+        return previewSize;
+    }
+
+    /**
+     * Returns the selected camera; one of {@link #CAMERA_FACING_BACK} or
+     * {@link #CAMERA_FACING_FRONT}.
+     */
+    public int getCameraFacing() {
+        return mFacing;
+    }
+
+    public int doZoom(float scale) {
+        synchronized (cameraLock) {
+            if (camera == null) {
+                return 0;
+            }
+            int currentZoom = 0;
+            int maxZoom;
+            Camera.Parameters parameters = camera.getParameters();
+            if (!parameters.isZoomSupported()) {
+                Log.w(TAG, "Zoom is not supported on this device");
+                return currentZoom;
+            }
+            maxZoom = parameters.getMaxZoom();
+
+            currentZoom = parameters.getZoom() + 1;
+            float newZoom;
+            if (scale > 1) {
+                newZoom = currentZoom + scale * (maxZoom / 10);
+            } else {
+                newZoom = currentZoom * scale;
+            }
+            currentZoom = Math.round(newZoom) - 1;
+            if (currentZoom < 0) {
+                currentZoom = 0;
+            } else if (currentZoom > maxZoom) {
+                currentZoom = maxZoom;
+            }
+            parameters.setZoom(currentZoom);
+            camera.setParameters(parameters);
+            return currentZoom;
+        }
+    }
+
+    /**
+     * Initiates taking a picture, which happens asynchronously.  The camera source should have been
+     * activated previously with {@link #start()} or {@link #start(SurfaceHolder)}.  The camera
+     * preview is suspended while the picture is being taken, but will resume once picture taking is
+     * done.
+     *
+     * @param shutter the callback for image capture moment, or null
+     * @param jpeg    the callback for JPEG image data, or null
+     */
+    public void takePicture(ShutterCallback shutter, PictureCallback jpeg) {
+        synchronized (cameraLock) {
+            if (camera != null) {
+                PictureStartCallback startCallback = new PictureStartCallback();
+                startCallback.mDelegate = shutter;
+                PictureDoneCallback doneCallback = new PictureDoneCallback();
+                doneCallback.mDelegate = jpeg;
+                camera.takePicture(startCallback, null, null, doneCallback);
+            }
+        }
+    }
+
+    /**
+     * Gets the current focus mode setting.
+     *
+     * @return current focus mode. This value is null if the camera is not yet created.
+     * Applications should call {@link #autoFocus(AutoFocusCallback)} to start the focus if focus
+     * mode is FOCUS_MODE_AUTO or FOCUS_MODE_MACRO.
+     * @see Camera.Parameters#FOCUS_MODE_AUTO
+     * @see Camera.Parameters#FOCUS_MODE_INFINITY
+     * @see Camera.Parameters#FOCUS_MODE_MACRO
+     * @see Camera.Parameters#FOCUS_MODE_FIXED
+     * @see Camera.Parameters#FOCUS_MODE_EDOF
+     * @see Camera.Parameters#FOCUS_MODE_CONTINUOUS_VIDEO
+     * @see Camera.Parameters#FOCUS_MODE_CONTINUOUS_PICTURE
+     */
+    @Nullable
+    @FocusMode
+    public String getFocusMode() {
+        return focusMode;
+    }
+
+    /**
+     * Sets the focus mode.
+     *
+     * @param mode the focus mode
+     * @return {@code true} if the focus mode is set, {@code false} otherwise
+     * @see #getFocusMode()
+     */
+    public boolean setFocusMode(@FocusMode String mode) {
+        synchronized (cameraLock) {
+            if (camera != null && mode != null) {
+                Camera.Parameters parameters = camera.getParameters();
+                if (parameters.getSupportedFocusModes().contains(mode)) {
+                    parameters.setFocusMode(mode);
+                    camera.setParameters(parameters);
+                    focusMode = mode;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /**
+     * Gets the current flash mode setting.
+     *
+     * @return current flash mode. null if flash mode setting is not
+     * supported or the camera is not yet created.
+     * @see Camera.Parameters#FLASH_MODE_OFF
+     * @see Camera.Parameters#FLASH_MODE_AUTO
+     * @see Camera.Parameters#FLASH_MODE_ON
+     * @see Camera.Parameters#FLASH_MODE_RED_EYE
+     * @see Camera.Parameters#FLASH_MODE_TORCH
+     */
+    @Nullable
+    @FlashMode
+    public String getFlashMode() {
+        return flashMode;
+    }
+
+    /**
+     * Sets the flash mode.
+     *
+     * @param mode flash mode.
+     * @return {@code true} if the flash mode is set, {@code false} otherwise
+     * @see #getFlashMode()
+     */
+    public boolean setFlashMode(@FlashMode String mode) {
+        synchronized (cameraLock) {
+            if (camera != null && mode != null) {
+                Camera.Parameters parameters = camera.getParameters();
+                if (parameters.getSupportedFlashModes().contains(mode)) {
+                    parameters.setFlashMode(mode);
+                    camera.setParameters(parameters);
+                    flashMode = mode;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /**
+     * Starts camera auto-focus and registers a callback function to run when
+     * the camera is focused.  This method is only valid when preview is active
+     * (between {@link #start()} or {@link #start(SurfaceHolder)} and before {@link #stop()}
+     * or {@link #release()}).
+     * <p/>
+     * <p>Callers should check
+     * {@link #getFocusMode()} to determine if
+     * this method should be called. If the camera does not support auto-focus,
+     * it is a no-op and {@link AutoFocusCallback#onAutoFocus(boolean)}
+     * callback will be called immediately.
+     * <p/>
+     * <p>If the current flash mode is not
+     * {@link Camera.Parameters#FLASH_MODE_OFF}, flash may be
+     * fired during auto-focus, depending on the driver and camera hardware.<p>
+     *
+     * @param cb the callback to run
+     * @see #cancelAutoFocus()
+     */
+    public void autoFocus(@Nullable AutoFocusCallback cb) {
+        synchronized (cameraLock) {
+            if (camera != null) {
+                CameraAutoFocusCallback autoFocusCallback = null;
+                if (cb != null) {
+                    autoFocusCallback = new CameraAutoFocusCallback();
+                    autoFocusCallback.mDelegate = cb;
+                }
+                camera.autoFocus(autoFocusCallback);
+            }
+        }
+    }
+
+    /**
+     * Cancels any auto-focus function in progress.
+     * Whether or not auto-focus is currently in progress,
+     * this function will return the focus position to the default.
+     * If the camera does not support auto-focus, this is a no-op.
+     *
+     * @see #autoFocus(AutoFocusCallback)
+     */
+    public void cancelAutoFocus() {
+        synchronized (cameraLock) {
+            if (camera != null) {
+                camera.cancelAutoFocus();
+            }
+        }
+    }
+
+    /**
+     * Sets camera auto-focus move callback.
+     *
+     * @param cb the callback to run
+     * @return {@code true} if the operation is supported (i.e. from Jelly Bean), {@code false}
+     * otherwise
+     */
+    @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
+    public boolean setAutoFocusMoveCallback(@Nullable AutoFocusMoveCallback cb) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) {
+            return false;
+        }
+
+        synchronized (cameraLock) {
+            if (camera != null) {
+                CameraAutoFocusMoveCallback autoFocusMoveCallback = null;
+                if (cb != null) {
+                    autoFocusMoveCallback = new CameraAutoFocusMoveCallback();
+                    autoFocusMoveCallback.mDelegate = cb;
+                }
+                camera.setAutoFocusMoveCallback(autoFocusMoveCallback);
+            }
+        }
+
+        return true;
+    }
+
+    //==============================================================================================
+    // Private
+    //==============================================================================================
+
+    /**
+     * Only allow creation via the builder class.
+     */
+    private CameraSource() {
+    }
+
+    /**
+     * Wraps the camera1 shutter callback so that the deprecated API isn't exposed.
+     */
+    private class PictureStartCallback implements Camera.ShutterCallback {
+        private ShutterCallback mDelegate;
+
+        @Override
+        public void onShutter() {
+            if (mDelegate != null) {
+                mDelegate.onShutter();
+            }
+        }
+    }
+
+    /**
+     * Wraps the final callback in the camera sequence, so that we can automatically turn the camera
+     * preview back on after the picture has been taken.
+     */
+    private class PictureDoneCallback implements Camera.PictureCallback {
+        private PictureCallback mDelegate;
+
+        @Override
+        public void onPictureTaken(byte[] data, Camera camera) {
+            if (mDelegate != null) {
+                mDelegate.onPictureTaken(data);
+            }
+            synchronized (cameraLock) {
+                if (CameraSource.this.camera != null) {
+                    CameraSource.this.camera.startPreview();
+                }
+            }
+        }
+    }
+
+    /**
+     * Wraps the camera1 auto focus callback so that the deprecated API isn't exposed.
+     */
+    private class CameraAutoFocusCallback implements Camera.AutoFocusCallback {
+        private AutoFocusCallback mDelegate;
+
+        @Override
+        public void onAutoFocus(boolean success, Camera camera) {
+            if (mDelegate != null) {
+                mDelegate.onAutoFocus(success);
+            }
+        }
+    }
+
+    /**
+     * Wraps the camera1 auto focus move callback so that the deprecated API isn't exposed.
+     */
+    @TargetApi(Build.VERSION_CODES.JELLY_BEAN)
+    private class CameraAutoFocusMoveCallback implements Camera.AutoFocusMoveCallback {
+        private AutoFocusMoveCallback mDelegate;
+
+        @Override
+        public void onAutoFocusMoving(boolean start, Camera camera) {
+            if (mDelegate != null) {
+                mDelegate.onAutoFocusMoving(start);
+            }
+        }
+    }
+
+    /**
+     * Opens the camera and applies the user settings.
+     *
+     * @throws RuntimeException if the method fails
+     */
+    @SuppressLint("InlinedApi")
+    private Camera createCamera() {
+        int requestedCameraId = getIdForRequestedCamera(mFacing);
+        if (requestedCameraId == -1) {
+            throw new RuntimeException("Could not find requested camera.");
+        }
+        Camera camera = Camera.open(requestedCameraId);
+
+        SizePair sizePair = selectSizePair(camera, requestedPreviewWidth, requestedPreviewHeight);
+        if (sizePair == null) {
+            throw new RuntimeException("Could not find suitable preview size.");
+        }
+        Size pictureSize = sizePair.pictureSize();
+        previewSize = sizePair.previewSize();
+
+        int[] previewFpsRange = selectPreviewFpsRange(camera, requestedFps);
+        if (previewFpsRange == null) {
+            throw new RuntimeException("Could not find suitable preview frames per second range.");
+        }
+
+        Camera.Parameters parameters = camera.getParameters();
+
+        if (pictureSize != null) {
+            parameters.setPictureSize(pictureSize.getWidth(), pictureSize.getHeight());
+        }
+
+        parameters.setPreviewSize(previewSize.getWidth(), previewSize.getHeight());
+        parameters.setPreviewFpsRange(
+                previewFpsRange[Camera.Parameters.PREVIEW_FPS_MIN_INDEX],
+                previewFpsRange[Camera.Parameters.PREVIEW_FPS_MAX_INDEX]);
+        parameters.setPreviewFormat(ImageFormat.NV21);
+
+        setRotation(camera, parameters, requestedCameraId);
+
+        if (focusMode != null) {
+            if (parameters.getSupportedFocusModes().contains(
+                    focusMode)) {
+                parameters.setFocusMode(focusMode);
+            } else {
+                Log.i(TAG, "Camera focus mode: " + focusMode +
+                        " is not supported on this device.");
+            }
+        }
+
+        // setting focusMode to the one set in the params
+        focusMode = parameters.getFocusMode();
+
+        if (flashMode != null) {
+            if (parameters.getSupportedFlashModes().contains(
+                    flashMode)) {
+                parameters.setFlashMode(flashMode);
+            } else {
+                Log.i(TAG, "Camera flash mode: " + flashMode +
+                        " is not supported on this device.");
+            }
+        }
+
+        // setting flashMode to the one set in the params
+        flashMode = parameters.getFlashMode();
+
+        camera.setParameters(parameters);
+
+        // Four frame buffers are needed for working with the camera:
+        //
+        //   one for the frame that is currently being executed upon in doing detection
+        //   one for the next pending frame to process immediately upon completing detection
+        //   two for the frames that the camera uses to populate future preview images
+        camera.setPreviewCallbackWithBuffer(new CameraPreviewCallback());
+        camera.addCallbackBuffer(createPreviewBuffer(previewSize));
+        camera.addCallbackBuffer(createPreviewBuffer(previewSize));
+        camera.addCallbackBuffer(createPreviewBuffer(previewSize));
+        camera.addCallbackBuffer(createPreviewBuffer(previewSize));
+
+        return camera;
+    }
+
+    /**
+     * Gets the id for the camera specified by the direction it is facing.  Returns -1 if no such
+     * camera was found.
+     *
+     * @param facing the desired camera (front-facing or rear-facing)
+     */
+    private static int getIdForRequestedCamera(int facing) {
+        CameraInfo cameraInfo = new CameraInfo();
+        for (int i = 0; i < Camera.getNumberOfCameras(); ++i) {
+            Camera.getCameraInfo(i, cameraInfo);
+            if (cameraInfo.facing == facing) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Selects the most suitable preview and picture size, given the desired width and height.
+     * <p/>
+     * Even though we may only need the preview size, it's necessary to find both the preview
+     * size and the picture size of the camera together, because these need to have the same aspect
+     * ratio.  On some hardware, if you would only set the preview size, you will get a distorted
+     * image.
+     *
+     * @param camera        the camera to select a preview size from
+     * @param desiredWidth  the desired width of the camera preview frames
+     * @param desiredHeight the desired height of the camera preview frames
+     * @return the selected preview and picture size pair
+     */
+    private static SizePair selectSizePair(Camera camera, int desiredWidth, int desiredHeight) {
+        List<SizePair> validPreviewSizes = generateValidPreviewSizeList(camera);
+
+        // The method for selecting the best size is to minimize the sum of the differences between
+        // the desired values and the actual values for width and height.  This is certainly not the
+        // only way to select the best size, but it provides a decent tradeoff between using the
+        // closest aspect ratio vs. using the closest pixel area.
+        SizePair selectedPair = null;
+        int minDiff = Integer.MAX_VALUE;
+        for (SizePair sizePair : validPreviewSizes) {
+            Size size = sizePair.previewSize();
+            int diff = Math.abs(size.getWidth() - desiredWidth) +
+                    Math.abs(size.getHeight() - desiredHeight);
+            if (diff < minDiff) {
+                selectedPair = sizePair;
+                minDiff = diff;
+            }
+        }
+
+        return selectedPair;
+    }
+
+    /**
+     * Stores a preview size and a corresponding same-aspect-ratio picture size.  To avoid distorted
+     * preview images on some devices, the picture size must be set to a size that is the same
+     * aspect ratio as the preview size or the preview may end up being distorted.  If the picture
+     * size is null, then there is no picture size with the same aspect ratio as the preview size.
+     */
+    private static class SizePair {
+        private Size mPreview;
+        private Size mPicture;
+
+        public SizePair(android.hardware.Camera.Size previewSize,
+                        android.hardware.Camera.Size pictureSize) {
+            mPreview = new Size(previewSize.width, previewSize.height);
+            if (pictureSize != null) {
+                mPicture = new Size(pictureSize.width, pictureSize.height);
+            }
+        }
+
+        public Size previewSize() {
+            return mPreview;
+        }
+
+        @SuppressWarnings("unused")
+        public Size pictureSize() {
+            return mPicture;
+        }
+    }
+
+    /**
+     * Generates a list of acceptable preview sizes.  Preview sizes are not acceptable if there is
+     * not a corresponding picture size of the same aspect ratio.  If there is a corresponding
+     * picture size of the same aspect ratio, the picture size is paired up with the preview size.
+     * <p/>
+     * This is necessary because even if we don't use still pictures, the still picture size must be
+     * set to a size that is the same aspect ratio as the preview size we choose.  Otherwise, the
+     * preview images may be distorted on some devices.
+     */
+    private static List<SizePair> generateValidPreviewSizeList(Camera camera) {
+        Camera.Parameters parameters = camera.getParameters();
+        List<android.hardware.Camera.Size> supportedPreviewSizes =
+                parameters.getSupportedPreviewSizes();
+        List<android.hardware.Camera.Size> supportedPictureSizes =
+                parameters.getSupportedPictureSizes();
+        List<SizePair> validPreviewSizes = new ArrayList<>();
+        for (android.hardware.Camera.Size previewSize : supportedPreviewSizes) {
+            float previewAspectRatio = (float) previewSize.width / (float) previewSize.height;
+
+            // By looping through the picture sizes in order, we favor the higher resolutions.
+            // We choose the highest resolution in order to support taking the full resolution
+            // picture later.
+            for (android.hardware.Camera.Size pictureSize : supportedPictureSizes) {
+                float pictureAspectRatio = (float) pictureSize.width / (float) pictureSize.height;
+                if (Math.abs(previewAspectRatio - pictureAspectRatio) < ASPECT_RATIO_TOLERANCE) {
+                    validPreviewSizes.add(new SizePair(previewSize, pictureSize));
+                    break;
+                }
+            }
+        }
+
+        // If there are no picture sizes with the same aspect ratio as any preview sizes, allow all
+        // of the preview sizes and hope that the camera can handle it.  Probably unlikely, but we
+        // still account for it.
+        if (validPreviewSizes.size() == 0) {
+            Log.w(TAG, "No preview sizes have a corresponding same-aspect-ratio picture size");
+            for (android.hardware.Camera.Size previewSize : supportedPreviewSizes) {
+                // The null picture size will let us know that we shouldn't set a picture size.
+                validPreviewSizes.add(new SizePair(previewSize, null));
+            }
+        }
+
+        return validPreviewSizes;
+    }
+
+    /**
+     * Selects the most suitable preview frames per second range, given the desired frames per
+     * second.
+     *
+     * @param camera            the camera to select a frames per second range from
+     * @param desiredPreviewFps the desired frames per second for the camera preview frames
+     * @return the selected preview frames per second range
+     */
+    private int[] selectPreviewFpsRange(Camera camera, float desiredPreviewFps) {
+        // The camera API uses integers scaled by a factor of 1000 instead of floating-point frame
+        // rates.
+        int desiredPreviewFpsScaled = (int) (desiredPreviewFps * 1000.0f);
+
+        // The method for selecting the best range is to minimize the sum of the differences between
+        // the desired value and the upper and lower bounds of the range.  This may select a range
+        // that the desired value is outside of, but this is often preferred.  For example, if the
+        // desired frame rate is 29.97, the range (30, 30) is probably more desirable than the
+        // range (15, 30).
+        int[] selectedFpsRange = null;
+        int minDiff = Integer.MAX_VALUE;
+        List<int[]> previewFpsRangeList = camera.getParameters().getSupportedPreviewFpsRange();
+        for (int[] range : previewFpsRangeList) {
+            int deltaMin = desiredPreviewFpsScaled - range[Camera.Parameters.PREVIEW_FPS_MIN_INDEX];
+            int deltaMax = desiredPreviewFpsScaled - range[Camera.Parameters.PREVIEW_FPS_MAX_INDEX];
+            int diff = Math.abs(deltaMin) + Math.abs(deltaMax);
+            if (diff < minDiff) {
+                selectedFpsRange = range;
+                minDiff = diff;
+            }
+        }
+        return selectedFpsRange;
+    }
+
+    /**
+     * Calculates the correct rotation for the given camera id and sets the rotation in the
+     * parameters.  It also sets the camera's display orientation and rotation.
+     *
+     * @param parameters the camera parameters for which to set the rotation
+     * @param cameraId   the camera id to set rotation based on
+     */
+    private void setRotation(Camera camera, Camera.Parameters parameters, int cameraId) {
+        WindowManager windowManager =
+                (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        int degrees = 0;
+        int rotation = windowManager.getDefaultDisplay().getRotation();
+        switch (rotation) {
+            case Surface.ROTATION_0:
+                degrees = 0;
+                break;
+            case Surface.ROTATION_90:
+                degrees = 90;
+                break;
+            case Surface.ROTATION_180:
+                degrees = 180;
+                break;
+            case Surface.ROTATION_270:
+                degrees = 270;
+                break;
+            default:
+                Log.e(TAG, "Bad rotation value: " + rotation);
+        }
+
+        CameraInfo cameraInfo = new CameraInfo();
+        Camera.getCameraInfo(cameraId, cameraInfo);
+
+        int angle;
+        int displayAngle;
+        if (cameraInfo.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+            angle = (cameraInfo.orientation + degrees) % 360;
+            displayAngle = (360 - angle); // compensate for it being mirrored
+        } else {  // back-facing
+            angle = (cameraInfo.orientation - degrees + 360) % 360;
+            displayAngle = angle;
+        }
+
+        // This corresponds to the rotation constants in {@link Frame}.
+        this.rotation = angle / 90;
+
+        camera.setDisplayOrientation(displayAngle);
+        parameters.setRotation(angle);
+    }
+
+    /**
+     * Creates one buffer for the camera preview callback.  The size of the buffer is based off of
+     * the camera preview size and the format of the camera image.
+     *
+     * @return a new preview buffer of the appropriate size for the current camera settings
+     */
+    private byte[] createPreviewBuffer(Size previewSize) {
+        int bitsPerPixel = ImageFormat.getBitsPerPixel(ImageFormat.NV21);
+        long sizeInBits = previewSize.getHeight() * previewSize.getWidth() * bitsPerPixel;
+        int bufferSize = (int) Math.ceil(sizeInBits / 8.0d) + 1;
+
+        //
+        // NOTICE: This code only works when using play services v. 8.1 or higher.
+        //
+
+        // Creating the byte array this way and wrapping it, as opposed to using .allocate(),
+        // should guarantee that there will be an array to work with.
+        byte[] byteArray = new byte[bufferSize];
+        ByteBuffer buffer = ByteBuffer.wrap(byteArray);
+        if (!buffer.hasArray() || (buffer.array() != byteArray)) {
+            // I don't think that this will ever happen.  But if it does, then we wouldn't be
+            // passing the preview content to the underlying detector later.
+            throw new IllegalStateException("Failed to create valid buffer for camera source.");
+        }
+
+        bytesToByteBuffer.put(byteArray, buffer);
+        return byteArray;
+    }
+
+    //==============================================================================================
+    // Frame processing
+    //==============================================================================================
+
+    /**
+     * Called when the camera has a new preview frame.
+     */
+    private class CameraPreviewCallback implements Camera.PreviewCallback {
+        @Override
+        public void onPreviewFrame(byte[] data, Camera camera) {
+            frameProcessor.setNextFrame(data, camera);
+        }
+    }
+
+    /**
+     * This runnable controls access to the underlying receiver, calling it to process frames when
+     * available from the camera.  This is designed to run detection on frames as fast as possible
+     * (i.e., without unnecessary context switching or waiting on the next frame).
+     * <p/>
+     * While detection is running on a frame, new frames may be received from the camera.  As these
+     * frames come in, the most recent frame is held onto as pending.  As soon as detection and its
+     * associated processing are done for the previous frame, detection on the mostly recently
+     * received frame will immediately start on the same thread.
+     */
+    private class FrameProcessingRunnable implements Runnable {
+        private Detector<?> mDetector;
+        private long mStartTimeMillis = SystemClock.elapsedRealtime();
+
+        // This lock guards all of the member variables below.
+        private final Object mLock = new Object();
+        private boolean mActive = true;
+
+        // These pending variables hold the state associated with the new frame awaiting processing.
+        private long mPendingTimeMillis;
+        private int mPendingFrameId = 0;
+        private ByteBuffer mPendingFrameData;
+
+        FrameProcessingRunnable(Detector<?> detector) {
+            mDetector = detector;
+        }
+
+        /**
+         * Releases the underlying receiver.  This is only safe to do after the associated thread
+         * has completed, which is managed in camera source's release method above.
+         */
+        @SuppressLint("Assert")
+        void release() {
+            assert (processingThread.getState() == State.TERMINATED);
+            mDetector.release();
+            mDetector = null;
+        }
+
+        /**
+         * Marks the runnable as active/not active.  Signals any blocked threads to continue.
+         */
+        void setActive(boolean active) {
+            synchronized (mLock) {
+                mActive = active;
+                mLock.notifyAll();
+            }
+        }
+
+        /**
+         * Sets the frame data received from the camera.  This adds the previous unused frame buffer
+         * (if present) back to the camera, and keeps a pending reference to the frame data for
+         * future use.
+         */
+        void setNextFrame(byte[] data, Camera camera) {
+            synchronized (mLock) {
+                if (mPendingFrameData != null) {
+                    camera.addCallbackBuffer(mPendingFrameData.array());
+                    mPendingFrameData = null;
+                }
+
+                if (!bytesToByteBuffer.containsKey(data)) {
+                    Log.d(TAG,
+                            "Skipping frame.  Could not find ByteBuffer associated with the image " +
+                                    "data from the camera.");
+                    return;
+                }
+
+                // Timestamp and frame ID are maintained here, which will give downstream code some
+                // idea of the timing of frames received and when frames were dropped along the way.
+                mPendingTimeMillis = SystemClock.elapsedRealtime() - mStartTimeMillis;
+                mPendingFrameId++;
+                mPendingFrameData = bytesToByteBuffer.get(data);
+
+                // Notify the processor thread if it is waiting on the next frame (see below).
+                mLock.notifyAll();
+            }
+        }
+
+        /**
+         * As long as the processing thread is active, this executes detection on frames
+         * continuously.  The next pending frame is either immediately available or hasn't been
+         * received yet.  Once it is available, we transfer the frame info to local variables and
+         * run detection on that frame.  It immediately loops back for the next frame without
+         * pausing.
+         * <p/>
+         * If detection takes longer than the time in between new frames from the camera, this will
+         * mean that this loop will run without ever waiting on a frame, avoiding any context
+         * switching or frame acquisition time latency.
+         * <p/>
+         * If you find that this is using more CPU than you'd like, you should probably decrease the
+         * FPS setting above to allow for some idle time in between frames.
+         */
+        @Override
+        public void run() {
+            Frame outputFrame;
+            ByteBuffer data;
+
+            while (true) {
+                synchronized (mLock) {
+                    while (mActive && (mPendingFrameData == null)) {
+                        try {
+                            // Wait for the next frame to be received from the camera, since we
+                            // don't have it yet.
+                            mLock.wait();
+                        } catch (InterruptedException e) {
+                            Log.d(TAG, "Frame processing loop terminated.", e);
+                            return;
+                        }
+                    }
+
+                    if (!mActive) {
+                        // Exit the loop once this camera source is stopped or released.  We check
+                        // this here, immediately after the wait() above, to handle the case where
+                        // setActive(false) had been called, triggering the termination of this
+                        // loop.
+                        return;
+                    }
+
+                    outputFrame = new Frame.Builder()
+                            .setImageData(mPendingFrameData, previewSize.getWidth(),
+                                    previewSize.getHeight(), ImageFormat.NV21)
+                            .setId(mPendingFrameId)
+                            .setTimestampMillis(mPendingTimeMillis)
+                            .setRotation(rotation)
+                            .build();
+
+                    // Hold onto the frame data locally, so that we can use this for detection
+                    // below.  We need to clear mPendingFrameData to ensure that this buffer isn't
+                    // recycled back to the camera before we are done using that data.
+                    data = mPendingFrameData;
+                    mPendingFrameData = null;
+                }
+
+                // The code below needs to run outside of synchronization, because this will allow
+                // the camera to add pending frame(s) while we are running detection on the current
+                // frame.
+
+                try {
+                    mDetector.receiveFrame(outputFrame);
+                } catch (Throwable t) {
+                    Log.e(TAG, "Exception thrown from receiver.", t);
+                } finally {
+                    camera.addCallbackBuffer(data.array());
+                }
+            }
+        }
+    }
+}
+
+
+CameraSourcePreview.java
+
+package com.google.android.gms.samples.vision.ocrreader.ui.camera;
+
+import android.Manifest;
+import android.content.Context;
+import android.content.res.Configuration;
+import android.support.annotation.RequiresPermission;
+import android.util.AttributeSet;
+import android.util.Log;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+import android.view.ViewGroup;
+
+import com.google.android.gms.common.images.Size;
+
+import java.io.IOException;
+
+public class CameraSourcePreview extends ViewGroup {
+    private static final String TAG = "CameraSourcePreview";
+
+    private Context context;
+    private SurfaceView surfaceView;
+    private boolean startRequested;
+    private boolean surfaceAvailable;
+    private CameraSource cameraSource;
+
+    private GraphicOverlay overlay;
+
+    public CameraSourcePreview(Context context, AttributeSet attrs) {
+        super(context, attrs);
+        this.context = context;
+        startRequested = false;
+        surfaceAvailable = false;
+
+        surfaceView = new SurfaceView(context);
+        surfaceView.getHolder().addCallback(new SurfaceCallback());
+        addView(surfaceView);
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    public void start(CameraSource cameraSource) throws IOException, SecurityException {
+        if (cameraSource == null) {
+            stop();
+        }
+
+        this.cameraSource = cameraSource;
+
+        if (this.cameraSource != null) {
+            startRequested = true;
+            startIfReady();
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    public void start(CameraSource cameraSource, GraphicOverlay overlay) throws IOException, SecurityException {
+        this.overlay = overlay;
+        start(cameraSource);
+    }
+
+    public void stop() {
+        if (cameraSource != null) {
+            cameraSource.stop();
+        }
+    }
+
+    public void release() {
+        if (cameraSource != null) {
+            cameraSource.release();
+            cameraSource = null;
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.CAMERA)
+    private void startIfReady() throws IOException, SecurityException {
+        if (startRequested && surfaceAvailable) {
+            cameraSource.start(surfaceView.getHolder());
+            if (overlay != null) {
+                Size size = cameraSource.getPreviewSize();
+                int min = Math.min(size.getWidth(), size.getHeight());
+                int max = Math.max(size.getWidth(), size.getHeight());
+                if (isPortraitMode()) {
+                    // Swap width and height sizes when in portrait, since it will be rotated by
+                    // 90 degrees
+                    overlay.setCameraInfo(min, max, cameraSource.getCameraFacing());
+                } else {
+                    overlay.setCameraInfo(max, min, cameraSource.getCameraFacing());
+                }
+                overlay.clear();
+            }
+            startRequested = false;
+        }
+    }
+
+    private class SurfaceCallback implements SurfaceHolder.Callback {
+        @Override
+        public void surfaceCreated(SurfaceHolder surface) {
+            surfaceAvailable = true;
+            try {
+                startIfReady();
+            } catch (SecurityException se) {
+                Log.e(TAG,"Do not have permission to start the camera", se);
+            } catch (IOException e) {
+                Log.e(TAG, "Could not start camera source.", e);
+            }
+        }
+
+        @Override
+        public void surfaceDestroyed(SurfaceHolder surface) {
+            surfaceAvailable = false;
+        }
+
+        @Override
+        public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+        }
+    }
+
+    @Override
+    protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+        int previewWidth = 320;
+        int previewHeight = 240;
+        if (cameraSource != null) {
+            Size size = cameraSource.getPreviewSize();
+            if (size != null) {
+                previewWidth = size.getWidth();
+                previewHeight = size.getHeight();
+            }
+        }
+
+        // Swap width and height sizes when in portrait, since it will be rotated 90 degrees
+        if (isPortraitMode()) {
+            int tmp = previewWidth;
+            previewWidth = previewHeight;
+            previewHeight = tmp;
+        }
+
+        final int viewWidth = right - left;
+        final int viewHeight = bottom - top;
+
+        int childWidth;
+        int childHeight;
+        int childXOffset = 0;
+        int childYOffset = 0;
+        float widthRatio = (float) viewWidth / (float) previewWidth;
+        float heightRatio = (float) viewHeight / (float) previewHeight;
+
+        // To fill the view with the camera preview, while also preserving the correct aspect ratio,
+        // it is usually necessary to slightly oversize the child and to crop off portions along one
+        // of the dimensions.  We scale up based on the dimension requiring the most correction, and
+        // compute a crop offset for the other dimension.
+        if (widthRatio > heightRatio) {
+            childWidth = viewWidth;
+            childHeight = (int) ((float) previewHeight * widthRatio);
+            childYOffset = (childHeight - viewHeight) / 2;
+        } else {
+            childWidth = (int) ((float) previewWidth * heightRatio);
+            childHeight = viewHeight;
+            childXOffset = (childWidth - viewWidth) / 2;
+        }
+
+        for (int i = 0; i < getChildCount(); ++i) {
+            // One dimension will be cropped.  We shift child over or up by this offset and adjust
+            // the size to maintain the proper aspect ratio.
+            getChildAt(i).layout(
+                    -1 * childXOffset, -1 * childYOffset,
+                    childWidth - childXOffset, childHeight - childYOffset);
+        }
+
+        try {
+            startIfReady();
+        } catch (SecurityException se) {
+            Log.e(TAG,"Do not have permission to start the camera", se);
+        } catch (IOException e) {
+            Log.e(TAG, "Could not start camera source.", e);
+        }
+    }
+
+    private boolean isPortraitMode() {
+        int orientation = context.getResources().getConfiguration().orientation;
+        if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
+            return false;
+        }
+        if (orientation == Configuration.ORIENTATION_PORTRAIT) {
+            return true;
+        }
+
+        Log.d(TAG, "isPortraitMode returning false by default");
+        return false;
+    }
+}
+
+GraphicOverlay.java
+
+package com.google.android.gms.samples.vision.ocrreader.ui.camera;
+
+import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Rect;
+import android.graphics.RectF;
+import android.util.AttributeSet;
+import android.view.View;
+
+import com.google.android.gms.vision.CameraSource;
+
+import java.util.HashSet;
+import java.util.Set;
+
+/**
+ * A view which renders a series of custom graphics to be overlaid on top of an associated preview
+ * (i.e., the camera preview).  The creator can add graphics objects, update the objects, and remove
+ * them, triggering the appropriate drawing and invalidation within the view.<p>
+ *
+ * Supports scaling and mirroring of the graphics relative the camera's preview properties.  The
+ * idea is that detection items are expressed in terms of a preview size, but need to be scaled up
+ * to the full view size, and also mirrored in the case of the front-facing camera.<p>
+ *
+ * Associated {@link Graphic} items should use the following methods to convert to view coordinates
+ * for the graphics that are drawn:
+ * <ol>
+ * <li>{@link Graphic#scaleX(float)} and {@link Graphic#scaleY(float)} adjust the size of the
+ * supplied value from the preview scale to the view scale.</li>
+ * <li>{@link Graphic#translateX(float)} and {@link Graphic#translateY(float)} adjust the coordinate
+ * from the preview's coordinate system to the view coordinate system.</li>
+ * </ol>
+ */
+public class GraphicOverlay<T extends GraphicOverlay.Graphic> extends View {
+    private final Object lock = new Object();
+    private int previewWidth;
+    private float widthScaleFactor = 1.0f;
+    private int previewHeight;
+    private float heightScaleFactor = 1.0f;
+    private int facing = CameraSource.CAMERA_FACING_BACK;
+    private Set<T> graphics = new HashSet<>();
+
+    /**
+     * Base class for a custom graphics object to be rendered within the graphic overlay.  Subclass
+     * this and implement the {@link Graphic#draw(Canvas)} method to define the
+     * graphics element.  Add instances to the overlay using {@link GraphicOverlay#add(Graphic)}.
+     */
+    public static abstract class Graphic {
+        private GraphicOverlay mOverlay;
+
+        public Graphic(GraphicOverlay overlay) {
+            mOverlay = overlay;
+        }
+
+        /**
+         * Draw the graphic on the supplied canvas.  Drawing should use the following methods to
+         * convert to view coordinates for the graphics that are drawn:
+         * <ol>
+         * <li>{@link Graphic#scaleX(float)} and {@link Graphic#scaleY(float)} adjust the size of
+         * the supplied value from the preview scale to the view scale.</li>
+         * <li>{@link Graphic#translateX(float)} and {@link Graphic#translateY(float)} adjust the
+         * coordinate from the preview's coordinate system to the view coordinate system.</li>
+         * </ol>
+         *
+         * @param canvas drawing canvas
+         */
+        public abstract void draw(Canvas canvas);
+
+        /**
+         * Returns true if the supplied coordinates are within this graphic.
+         */
+        public abstract boolean contains(float x, float y);
+
+        /**
+         * Adjusts a horizontal value of the supplied value from the preview scale to the view
+         * scale.
+         */
+        public float scaleX(float horizontal) {
+            return horizontal * mOverlay.widthScaleFactor;
+        }
+
+        /**
+         * Adjusts a vertical value of the supplied value from the preview scale to the view scale.
+         */
+        public float scaleY(float vertical) {
+            return vertical * mOverlay.heightScaleFactor;
+        }
+
+        /**
+         * Adjusts the x coordinate from the preview's coordinate system to the view coordinate
+         * system.
+         */
+        public float translateX(float x) {
+            if (mOverlay.facing == CameraSource.CAMERA_FACING_FRONT) {
+                return mOverlay.getWidth() - scaleX(x);
+            } else {
+                return scaleX(x);
+            }
+        }
+
+        /**
+         * Adjusts the y coordinate from the preview's coordinate system to the view coordinate
+         * system.
+         */
+        public float translateY(float y) {
+            return scaleY(y);
+        }
+
+        /**
+         * Returns a RectF in which the left and right parameters of the provided Rect are adjusted
+         * by translateX, and the top and bottom are adjusted by translateY.
+         */
+        public RectF translateRect(RectF inputRect) {
+            RectF returnRect = new RectF();
+
+            returnRect.left = translateX(inputRect.left);
+            returnRect.top = translateY(inputRect.top);
+            returnRect.right = translateX(inputRect.right);
+            returnRect.bottom = translateY(inputRect.bottom);
+
+            return returnRect;
+        }
+
+        public void postInvalidate() {
+            mOverlay.postInvalidate();
+        }
+    }
+
+    public GraphicOverlay(Context context, AttributeSet attrs) {
+        super(context, attrs);
+    }
+
+    /**
+     * Removes all graphics from the overlay.
+     */
+    public void clear() {
+        synchronized (lock) {
+            graphics.clear();
+        }
+        postInvalidate();
+    }
+
+    /**
+     * Adds a graphic to the overlay.
+     */
+    public void add(T graphic) {
+        synchronized (lock) {
+            graphics.add(graphic);
+        }
+        postInvalidate();
+    }
+
+    /**
+     * Removes a graphic from the overlay.
+     */
+    public void remove(T graphic) {
+        synchronized (lock) {
+            graphics.remove(graphic);
+        }
+        postInvalidate();
+    }
+
+    /**
+     * Returns the first graphic, if any, that exists at the provided absolute screen coordinates.
+     * These coordinates will be offset by the relative screen position of this view.
+     * @return First graphic containing the point, or null if no text is detected.
+     */
+    public T getGraphicAtLocation(float rawX, float rawY) {
+        synchronized (lock) {
+            // Get the position of this View so the raw location can be offset relative to the view.
+            int[] location = new int[2];
+            this.getLocationOnScreen(location);
+            for (T graphic : graphics) {
+                if (graphic.contains(rawX - location[0], rawY - location[1])) {
+                    return graphic;
+                }
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Sets the camera attributes for size and facing direction, which informs how to transform
+     * image coordinates later.
+     */
+    public void setCameraInfo(int previewWidth, int previewHeight, int facing) {
+        synchronized (lock) {
+            this.previewWidth = previewWidth;
+            this.previewHeight = previewHeight;
+            this.facing = facing;
+        }
+        postInvalidate();
+    }
+
+    /**
+     * Draws the overlay with its associated graphic objects.
+     */
+    @Override
+    protected void onDraw(Canvas canvas) {
+        super.onDraw(canvas);
+
+        synchronized (lock) {
+            if ((previewWidth != 0) && (previewHeight != 0)) {
+                widthScaleFactor = (float) canvas.getWidth() / (float) previewWidth;
+                heightScaleFactor = (float) canvas.getHeight() / (float) previewHeight;
+            }
+
+            for (Graphic graphic : graphics) {
+                graphic.draw(canvas);
+            }
+        }
+    }
+}
